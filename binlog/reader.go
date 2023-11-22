@@ -6,10 +6,8 @@ import (
 	"io"
 )
 
-type rs int
-
 const (
-	rsStartEventV3 rs = iota
+	headerSize = 19
 )
 
 type Reader interface {
@@ -25,21 +23,35 @@ func newReaderImpl(r io.Reader) (Reader, error) {
 	if !reader.check() {
 		return nil, ErrInvalidHeader
 	}
-	reader.s = rsStartEventV3
 	return reader, nil
 }
 
 type readerImpl struct {
 	r io.Reader
-	s rs
 }
 
 func (r *readerImpl) ReadEvent() (Event, error) {
-	switch r.s {
-	case rsStartEventV3:
+	header, err := r.readEventHeader()
+	if err != nil {
+		return nil, err
+	}
+	println(header.EventType.String(), header.EventType, header.EventSize-headerSize)
+	//switch header.EventType {
+	//case EventTypeStartEventV3:
+	//	return r.readStartEventV3()
+	//case EventTypeFormatDescriptionEvent:
+	//	return r.readFormatDescriptionEvent(header)
+	//}
 
+	if err = r.skip(int(header.EventSize) - headerSize); err != nil {
+		return nil, err
 	}
 	return nil, nil
+}
+
+func (r *readerImpl) skip(n int) (err error) {
+	_, err = io.CopyN(io.Discard, r.r, int64(n))
+	return
 }
 
 func (r *readerImpl) readStartEventV3() (Event, error) {
@@ -59,6 +71,51 @@ func (r *readerImpl) readStartEventV3() (Event, error) {
 		BinlogVersion:      binlogVersion,
 		MysqlServerVersion: mysqlServerVersion,
 		CreateTimestamp:    createTimestamp,
+	}, nil
+}
+
+func (r *readerImpl) readFormatDescriptionEvent(header *EventHeader) (Event, error) {
+	binlogVersion, err := r.readInt2()
+	if err != nil {
+		return nil, err
+	}
+	mysqlServerVersion, err := r.readFixedString(50)
+	if err != nil {
+		return nil, err
+	}
+	createTimestamp, err := r.readInt4()
+	if err != nil {
+		return nil, err
+	}
+	headerLength, err := r.readInt1()
+	if err != nil {
+		return nil, err
+	}
+
+	eventTypesSize := header.EventSize - uint32(headerLength) - /*headerLength*/ (2 + 50 + 4 + 1) - /*checksum_algo*/ 1 - /*checksum*/ 4
+	eventTypes, err := r.readBytes(int(eventTypesSize))
+	if err != nil {
+		return nil, err
+	}
+
+	checksumAlgo, err := r.readInt1()
+	if err != nil {
+		return nil, err
+	}
+
+	crc32Bytes, err := r.readBytes(4)
+	if err != nil {
+		return nil, err
+	}
+
+	return &FormatDescriptionEvent{
+		BinlogVersion:      binlogVersion,
+		MysqlServerVersion: mysqlServerVersion,
+		CreateTimestamp:    createTimestamp,
+		HeaderLength:       headerLength,
+		EventTypes:         eventTypes,
+		ChecksumAlgo:       ChecksumAlgo(checksumAlgo),
+		Crc32Bytes:         crc32Bytes,
 	}, nil
 }
 
@@ -121,7 +178,7 @@ func (r *readerImpl) readInt2() (uint16, error) {
 	if err != nil {
 		return 0, err
 	}
-	return binary.BigEndian.Uint16(bytes), nil
+	return binary.LittleEndian.Uint16(bytes), nil
 }
 
 // readInt4 reads 4 bytes as uint32.
@@ -130,7 +187,7 @@ func (r *readerImpl) readInt4() (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
-	return binary.BigEndian.Uint32(bytes), nil
+	return binary.LittleEndian.Uint32(bytes), nil
 }
 
 // readInt8 reads 8 bytes as uint64.
@@ -139,7 +196,7 @@ func (r *readerImpl) readInt8() (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return binary.BigEndian.Uint64(bytes), nil
+	return binary.LittleEndian.Uint64(bytes), nil
 }
 
 func (r *readerImpl) readFixedString(n int) (string, error) {
